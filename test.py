@@ -1,31 +1,57 @@
-import matplotlib.pyplot as plt
 import numpy as np
-def f(x):
-    return 2*x**2
+import time
+import os
 
+def setup_gpu():
+    # Enable GPU acceleration
+    os.environ['ACCELERATE_DISABLE_VFORCE'] = '1'
+    # Force numpy to use Metal backend
+    os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
 
-x = np.array(np.arange(0,5,0.001))
-y = f(x)
-plt.plot(x, y)
-colors = ['k','g','r','b','c']
-def approximate_tangent_line(x, approximate_derivative):
-    return (approximate_derivative*x) + b
+def setup_cpu():
+    # Disable GPU acceleration
+    os.environ['ACCELERATE_DISABLE_VFORCE'] = '0'
+    # Allow CPU to use all threads
+    os.environ.pop('VECLIB_MAXIMUM_THREADS', None)
 
-for i in range(5):
-    p2_delta = 0.0001
-    x1 = i
-    x2 = x1+p2_delta
-    y1 = f(x1)
-    y2 = f(x2)
-    print((x1, y1), (x2, y2))
-    approximate_derivative = (y2-y1)/(x2-x1)
-    b = y2-(approximate_derivative*x2)
-    to_plot = [x1-0.9, x1, x1+0.9]
-    plt.scatter(x1, y1, c=colors[i])
-    plt.plot([point for point in to_plot],
-            [approximate_tangent_line(point, approximate_derivative)
-            for point in to_plot],
-            c=colors[i])
-    print('Approximate derivative for f(x)',
-        f'where x = {x1} is {approximate_derivative}')
-plt.show()
+def benchmark_matmul(size, warmup=True):
+    # Create matrices with proper memory layout
+    A = np.ascontiguousarray(np.random.rand(size, size).astype(np.float32))
+    B = np.ascontiguousarray(np.random.rand(size, size).astype(np.float32))
+
+    # Warmup run to initialize any lazy loading
+    if warmup:
+        _ = np.dot(A[0:100, 0:100], B[0:100, 0:100])
+        time.sleep(0.1)  # Let system stabilize
+
+    # Actual benchmark
+    times = []
+    for _ in range(5):  # Run multiple times for more reliable results
+        start = time.time()
+        C = np.dot(A, B)
+        # Force completion of computation
+        C.sum()
+        end = time.time()
+        times.append(end - start)
+
+    return min(times)  # Return best time
+
+# Run benchmarks
+if __name__ == "__main__":
+    size = 8000  # Larger size to make GPU advantage more apparent
+
+    print("Testing CPU performance...")
+    setup_cpu()
+    import importlib
+    importlib.reload(np)
+    cpu_time = benchmark_matmul(size)
+
+    print("\nTesting GPU performance...")
+    setup_gpu()
+    importlib.reload(np)
+    gpu_time = benchmark_matmul(size)
+
+    print(f"\nResults for {size}x{size} matrix multiplication:")
+    print(f"CPU time: {cpu_time:.3f} seconds")
+    print(f"GPU time: {gpu_time:.3f} seconds")
+    print(f"Speedup: {cpu_time/gpu_time:.2f}x")

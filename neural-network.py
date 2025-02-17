@@ -7,35 +7,45 @@ import cv2
 import pickle
 import copy
 import matplotlib.pyplot as plt
+import tarfile
+from numpy.random import default_rng
+
+rng = default_rng()
+os.environ['ACCELERATE_DISABLE_VFORCE'] = '1'
+os.environ['VECLIB_MAXIMUM_THREADS'] = '1'
+
 
 
 class Layer_Dense:
     def __init__(self, n_inputs, n_neurons,
-                 weight_regularizer_l1=0, weight_regularizer_l2=0,
-                 bias_regularizer_l1=0, bias_regularizer_l2=0):
-        self.weights = 0.01 * np.random.randn(n_inputs, n_neurons)
-        self.biases = np.zeros((1, n_neurons))
-        # set lambda hyperparameters for regularization
+                 weight_regularizer_l1=0.01, weight_regularizer_l2=0.01,
+                 bias_regularizer_l1=0.01, bias_regularizer_l2=0.01):
+        self.weights = np.ascontiguousarray(0.01 * rng.standard_normal((n_inputs, n_neurons)))
+        self.biases = np.ascontiguousarray(np.zeros((1, n_neurons)))
+
         self.weight_regularizer_l1 = weight_regularizer_l1
         self.weight_regularizer_l2 = weight_regularizer_l2
         self.bias_regularizer_l1 = bias_regularizer_l1
         self.bias_regularizer_l2 = bias_regularizer_l2
 
     def forward(self, inputs, training):
+        inputs = np.ascontiguousarray(inputs)
         self.inputs = inputs
-        self.output = np.dot(inputs, self.weights) + self.biases
+        self.output = np.ascontiguousarray(np.dot(inputs, self.weights) + self.biases)
 
     def backward(self, dvalues):
-        self.dweights = np.dot(self.inputs.T, dvalues)
-        self.dbiases = np.sum(dvalues, axis=0, keepdims=True)
+        dvalues = np.ascontiguousarray(dvalues)
+
+        self.dweights = np.ascontiguousarray(np.dot(self.inputs.T, dvalues))
+        self.dbiases = np.ascontiguousarray(np.sum(dvalues, axis=0, keepdims=True))
+
         if self.weight_regularizer_l1 > 0:
             dL1 = np.ones_like(self.weights)
             dL1[self.weights < 0] = -1
             self.dweights += self.weight_regularizer_l1 * dL1
 
         if self.weight_regularizer_l2 > 0:
-            self.dweights += 2 * self.weight_regularizer_l2 * \
-                             self.weights
+            self.dweights += 2 * self.weight_regularizer_l2 * self.weights
 
         if self.bias_regularizer_l1 > 0:
             dL1 = np.ones_like(self.biases)
@@ -43,18 +53,9 @@ class Layer_Dense:
             self.dbiases += self.bias_regularizer_l1 * dL1
 
         if self.bias_regularizer_l2 > 0:
-            self.dbiases += 2 * self.bias_regularizer_l2 * \
-                            self.biases
+            self.dbiases += 2 * self.bias_regularizer_l2 * self.biases
 
-        # gradients to propogate to prev layer
-        self.dinputs = np.dot(dvalues, self.weights.T)
-
-    def get_parameters(self):
-        return self.weights, self.biases
-
-    def set_parameters(self, weights, biases):
-        self.weights = weights
-        self.biases = biases
+        self.dinputs = np.ascontiguousarray(np.dot(dvalues, self.weights.T))
 
 
 class Layer_Dropout:
@@ -84,12 +85,12 @@ class Layer_Input:
 class Activation_ReLU:
     def forward(self, inputs, training):
         self.inputs = inputs
-        self.output = np.maximum(0, inputs)
+        self.output = np.ascontiguousarray(np.maximum(0, inputs))
 
     def backward(self, dvalues):
         self.dinputs = dvalues.copy()
-        # zero out the gradients where the original inputs were <= 0
         self.dinputs[self.inputs <= 0] = 0
+        self.dinputs = np.ascontiguousarray(self.dinputs)
 
     def predictions(self, outputs):
         return outputs
@@ -281,112 +282,6 @@ class Activation_Softmax_Loss_CategoricalCrossentropy():
         self.dinputs = self.dinputs / samples
 
 
-class Optimizer_SGD:
-    def __init__(self, learning_rate=1., decay=0., momentum=0.):
-        self.learning_rate = learning_rate
-        self.current_learning_rate = learning_rate
-        self.decay = decay
-        self.iterations = 0
-        self.momentum = momentum
-
-    def pre_update_params(self):
-        if self.decay:
-            self.current_learning_rate = self.learning_rate * \
-                                         (1. / (1. + self.decay * self.iterations))
-
-    def update_params(self, layer):
-        if self.momentum:
-            if not hasattr(layer, 'weight_momentums'):
-                layer.weight_momentums = np.zeros_like(layer.weights)
-                layer.bias_momentums = np.zeros_like(layer.biases)
-
-            weight_updates = \
-                self.momentum * layer.weight_momentums - \
-                self.current_learning_rate * layer.dweights
-            layer.weight_momentums = weight_updates
-
-            bias_updates = \
-                self.momentum * layer.bias_momentums - \
-                self.current_learning_rate * layer.dbiases
-            layer.bias_momentums = bias_updates
-        else:
-            weight_updates = -self.current_learning_rate * layer.dweights
-            bias_updates = -self.current_learning_rate * layer.dbiases
-
-        layer.weights += weight_updates
-        layer.biases += bias_updates
-
-    def post_update_params(self):
-        self.iterations += 1
-
-
-class Optimizer_Adagrad:
-    def __init__(self, learning_rate=1., decay=0., epsilon=1e-7):
-        self.learning_rate = learning_rate
-        self.current_learning_rate = learning_rate
-        self.decay = decay
-        self.iterations = 0
-        self.epsilon = epsilon
-
-    def pre_update_params(self):
-        if self.decay:
-            self.current_learning_rate = self.learning_rate * \
-                                         (1. / (1. + self.decay * self.iterations))
-
-    def update_params(self, layer):
-        if not hasattr(layer, 'weight_cache'):
-            layer.weight_cache = np.zeros_like(layer.weights)
-            layer.bias_cache = np.zeros_like(layer.biases)
-
-        layer.weight_cache += layer.dweights ** 2
-        layer.bias_cache += layer.dbiases ** 2
-
-        layer.weights += -self.current_learning_rate * \
-                         layer.dweights / \
-                         (np.sqrt(layer.weight_cache) + self.epsilon)
-        layer.biases += -self.current_learning_rate * \
-                        layer.dbiases / \
-                        (np.sqrt(layer.bias_cache) + self.epsilon)
-
-    def post_update_params(self):
-        self.iterations += 1
-
-
-class Optimizer_RMSprop:
-    def __init__(self, learning_rate=0.001, decay=0., epsilon=1e-7, rho=0.9):
-        self.learning_rate = learning_rate
-        self.current_learning_rate = learning_rate
-        self.decay = decay
-        self.iterations = 0
-        self.epsilon = epsilon
-        self.rho = rho
-
-    def pre_update_params(self):
-        if self.decay:
-            self.current_learning_rate = self.learning_rate * \
-                                         (1. / (1. + self.decay * self.iterations))
-
-    def update_params(self, layer):
-        if not hasattr(layer, 'weight_cache'):
-            layer.weight_cache = np.zeros_like(layer.weights)
-            layer.bias_cache = np.zeros_like(layer.biases)
-
-        layer.weight_cache = self.rho * layer.weight_cache + \
-                             (1 - self.rho) * layer.dweights ** 2
-        layer.bias_cache = self.rho * layer.bias_cache + \
-                           (1 - self.rho) * layer.dbiases ** 2
-
-        layer.weights += -self.current_learning_rate * \
-                         layer.dweights / \
-                         (np.sqrt(layer.weight_cache) + self.epsilon)
-        layer.biases += -self.current_learning_rate * \
-                        layer.dbiases / \
-                        (np.sqrt(layer.bias_cache) + self.epsilon)
-
-    def post_update_params(self):
-        self.iterations += 1
-
-
 class Optimizer_Adam:
     def __init__(self, learning_rate=0.001, decay=0., epsilon=1e-7,
                  beta_1=0.9, beta_2=0.999):
@@ -410,36 +305,49 @@ class Optimizer_Adam:
             layer.bias_momentums = np.zeros_like(layer.biases)
             layer.bias_cache = np.zeros_like(layer.biases)
 
-        layer.weight_momentums = self.beta_1 * \
-                                 layer.weight_momentums + \
-                                 (1 - self.beta_1) * layer.dweights
-        layer.bias_momentums = self.beta_1 * \
-                               layer.bias_momentums + \
-                               (1 - self.beta_1) * layer.dbiases
+        # Update momentum with current gradients
+        layer.weight_momentums = np.ascontiguousarray(
+            self.beta_1 * layer.weight_momentums +
+            (1 - self.beta_1) * layer.dweights
+        )
+        layer.bias_momentums = np.ascontiguousarray(
+            self.beta_1 * layer.bias_momentums +
+            (1 - self.beta_1) * layer.dbiases
+        )
 
+        # Get corrected momentum
         weight_momentums_corrected = layer.weight_momentums / \
                                      (1 - self.beta_1 ** (self.iterations + 1))
         bias_momentums_corrected = layer.bias_momentums / \
                                    (1 - self.beta_1 ** (self.iterations + 1))
 
-        layer.weight_cache = self.beta_2 * layer.weight_cache + \
-                             (1 - self.beta_2) * layer.dweights ** 2
-        layer.bias_cache = self.beta_2 * layer.bias_cache + \
-                           (1 - self.beta_2) * layer.dbiases ** 2
+        # Update cache with squared current gradients
+        layer.weight_cache = np.ascontiguousarray(
+            self.beta_2 * layer.weight_cache +
+            (1 - self.beta_2) * layer.dweights ** 2
+        )
+        layer.bias_cache = np.ascontiguousarray(
+            self.beta_2 * layer.bias_cache +
+            (1 - self.beta_2) * layer.dbiases ** 2
+        )
 
+        # Get corrected cache
         weight_cache_corrected = layer.weight_cache / \
                                  (1 - self.beta_2 ** (self.iterations + 1))
         bias_cache_corrected = layer.bias_cache / \
                                (1 - self.beta_2 ** (self.iterations + 1))
 
-        layer.weights += -self.current_learning_rate * \
-                         weight_momentums_corrected / \
-                         (np.sqrt(weight_cache_corrected) +
-                          self.epsilon)
-        layer.biases += -self.current_learning_rate * \
-                        bias_momentums_corrected / \
-                        (np.sqrt(bias_cache_corrected) +
-                         self.epsilon)
+        # Vanilla SGD parameter update + normalization
+        layer.weights = np.ascontiguousarray(
+            layer.weights - self.current_learning_rate *
+            weight_momentums_corrected /
+            (np.sqrt(weight_cache_corrected) + self.epsilon)
+        )
+        layer.biases = np.ascontiguousarray(
+            layer.biases - self.current_learning_rate *
+            bias_momentums_corrected /
+            (np.sqrt(bias_cache_corrected) + self.epsilon)
+        )
 
     def post_update_params(self):
         self.iterations += 1
@@ -532,12 +440,23 @@ class Model:
             self.softmax_classifier_output = Activation_Softmax_Loss_CategoricalCrossentropy()
 
     def train(self, X, y, *, epochs=1, batch_size=None, print_every=1, validation_data=None):
+        """Training loop optimized for GPU execution."""
+        # Import garbage collector for memory management
+        import gc
+
         self.accuracy.init(y)
         train_steps = 1
 
         if validation_data is not None:
             validation_steps = 1
             X_val, y_val = validation_data
+            # Ensure validation data is in the right format
+            X_val = np.ascontiguousarray(X_val, dtype=np.float32)
+            y_val = np.ascontiguousarray(y_val, dtype=np.float32)
+
+        # Ensure training data is in the right format
+        X = np.ascontiguousarray(X, dtype=np.float32)
+        y = np.ascontiguousarray(y, dtype=np.float32)
 
         if batch_size is not None:
             train_steps = len(X) // batch_size
@@ -549,6 +468,7 @@ class Model:
                 if validation_steps * batch_size < len(X_val):
                     validation_steps += 1
 
+        # Training loop
         for epoch in range(1, epochs + 1):
             print(f'epoch: {epoch}')
             self.loss.new_pass()
@@ -562,31 +482,61 @@ class Model:
                     batch_X = X[step * batch_size:(step + 1) * batch_size]
                     batch_y = y[step * batch_size:(step + 1) * batch_size]
 
+                    batch_X = np.ascontiguousarray(batch_X)
+                    batch_y = np.ascontiguousarray(batch_y)
+
+                # Forward pass
                 output = self.forward(batch_X, training=True)
-                data_loss, regularization_loss = self.loss.calculate(output, batch_y, include_regularization=True)
+
+                # Calculate loss
+                data_loss, regularization_loss = \
+                    self.loss.calculate(output, batch_y, include_regularization=True)
                 loss = data_loss + regularization_loss
+
+                # Calculate predictions and accuracy
                 predictions = self.output_layer_activation.predictions(output)
                 accuracy = self.accuracy.calculate(predictions, batch_y)
+
+                # Backward pass
                 self.backward(output, batch_y)
 
+                # Optimize
                 self.optimizer.pre_update_params()
                 for layer in self.trainable_layers:
                     self.optimizer.update_params(layer)
                 self.optimizer.post_update_params()
 
+                # Print progress
                 if not step % print_every or step == train_steps - 1:
-                    print(
-                        f'step: {step}, acc: {accuracy:.3f}, loss: {loss:.3f} (data_loss: {data_loss:.3f}, reg_loss: {regularization_loss:.3f}), lr: {self.optimizer.current_learning_rate}')
+                    print(f'step: {step}, ' +
+                          f'acc: {accuracy:.3f}, ' +
+                          f'loss: {loss:.3f} (' +
+                          f'data_loss: {data_loss:.3f}, ' +
+                          f'reg_loss: {regularization_loss:.3f}), ' +
+                          f'lr: {self.optimizer.current_learning_rate}')
 
-            epoch_data_loss, epoch_regularization_loss = self.loss.calculate_accumulated(include_regularization=True)
+                # Clear some memory after each batch
+                gc.collect()
+
+            # Calculate epoch metrics
+            epoch_data_loss, epoch_regularization_loss = \
+                self.loss.calculate_accumulated(include_regularization=True)
             epoch_loss = epoch_data_loss + epoch_regularization_loss
             epoch_accuracy = self.accuracy.calculate_accumulated()
 
-            print(
-                f'training, acc: {epoch_accuracy:.3f}, loss: {epoch_loss:.3f} (data_loss: {epoch_data_loss:.3f}, reg_loss: {epoch_regularization_loss:.3f}), lr: {self.optimizer.current_learning_rate}')
+            print(f'training, ' +
+                  f'acc: {epoch_accuracy:.3f}, ' +
+                  f'loss: {epoch_loss:.3f} (' +
+                  f'data_loss: {epoch_data_loss:.3f}, ' +
+                  f'reg_loss: {epoch_regularization_loss:.3f}), ' +
+                  f'lr: {self.optimizer.current_learning_rate}')
 
-        if validation_data is not None:
-            self.evaluate(*validation_data, batch_size=batch_size)
+            # Run validation
+            if validation_data is not None:
+                self.evaluate(*validation_data, batch_size=batch_size)
+
+            # Clear memory after each epoch
+            gc.collect()
 
     def forward(self, X, training):
         self.input_layer.forward(X, training)
@@ -668,7 +618,6 @@ class Model:
             for property in ['inputs', 'output', 'dinputs', 'dweights', 'dbiases']:
                 layer.__dict__.pop(property, None)
 
-
         with open(path, 'wb') as f:
             pickle.dump(model, f)
 
@@ -698,108 +647,191 @@ class Model:
         return np.vstack(output)
 
 
-def load_mnist_dataset(dataset, path):
-    labels = os.listdir(os.path.join(path, dataset))
+def load_dataset(dataset, path, image_size=(64, 64), augment=False):
     X = []
-    Y = []
+    y = []
+
+    labels = [f for f in os.listdir(os.path.join(path, dataset))
+              if not f.startswith('.') and
+              os.path.isdir(os.path.join(path, dataset, f))]
+
+    label_to_idx = {label: idx for idx, label in enumerate(sorted(labels))}
 
     for label in labels:
-        for file in os.listdir(os.path.join(path, dataset, label)):
-            image = cv2.imread(os.path.join(path, dataset, label, file), cv2.IMREAD_UNCHANGED)
+        label_path = os.path.join(path, dataset, label)
+        files = [f for f in os.listdir(label_path)
+                 if not f.startswith('.') and
+                 os.path.isfile(os.path.join(label_path, f))]
+
+        for file in files:
+            image_path = os.path.join(label_path, file)
+            image = cv2.imread(image_path)
+
+            if image is None:
+                print(f"Warning: Could not load image {image_path}")
+                continue
+
+            if len(image.shape) == 3:
+                image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+            image = cv2.resize(image, image_size)
+
             X.append(image)
-            Y.append(label)
+            y.append(label_to_idx[label])
 
-    return np.array(X), np.array(Y).astype('uint8')
+            if augment:
+                flipped = cv2.flip(image, 1)
+                X.append(flipped)
+                y.append(label_to_idx[label])
+
+                M = cv2.getRotationMatrix2D((image_size[0] / 2, image_size[1] / 2), 10, 1.0)
+                rotated = cv2.warpAffine(image, M, image_size)
+                X.append(rotated)
+                y.append(label_to_idx[label])
+
+                adjusted = cv2.convertScaleAbs(image, alpha=1.2, beta=10)
+                X.append(adjusted)
+                y.append(label_to_idx[label])
+
+    X = np.array(X)
+    y = np.array(y)
+
+    num_classes = len(labels)
+    y_one_hot = np.zeros((y.shape[0], num_classes))
+    y_one_hot[np.arange(y.shape[0]), y] = 1
+
+    return X, y_one_hot
 
 
-def create_data_mnist(path):
-    X, y = load_mnist_dataset('train', path)
-    X_test, y_test = load_mnist_dataset('test', path)
+def create_model():
+    model = Model()
 
-    return X, y, X_test, y_test
+    model.add(Layer_Dense(3072, 1024,
+                          weight_regularizer_l1=0, weight_regularizer_l2=5e-4,
+                          bias_regularizer_l1=0, bias_regularizer_l2=5e-4))
+    model.add(Activation_ReLU())
+    model.add(Layer_Dropout(0.2))
+
+    model.add(Layer_Dense(1024, 512,
+                          weight_regularizer_l1=0, weight_regularizer_l2=5e-4,
+                          bias_regularizer_l1=0, bias_regularizer_l2=5e-4))
+    model.add(Activation_ReLU())
+    model.add(Layer_Dropout(0.3))
+
+    model.add(Layer_Dense(512, 256,
+                          weight_regularizer_l1=0, weight_regularizer_l2=5e-4,
+                          bias_regularizer_l1=0, bias_regularizer_l2=5e-4))
+    model.add(Activation_ReLU())
+    model.add(Layer_Dropout(0.3))
+
+    model.add(Layer_Dense(256, 10,
+                          weight_regularizer_l1=0, weight_regularizer_l2=5e-4,
+                          bias_regularizer_l1=0, bias_regularizer_l2=5e-4))
+    model.add(Activation_Softmax())
+
+    model.set(
+        loss=Loss_CategoricalCrossentropy(),
+        optimizer=Optimizer_Adam(
+            learning_rate=0.001,
+            decay=1e-4
+        ),
+        accuracy=Accuracy_Categorical()
+    )
+
+    model.finalize()
+    return model
 
 
-# 28x28 pixel images of clothing, 60000 samples, 6k per class
-# X, y, X_test, y_test = create_data_mnist('fashion_mnist_images')
+def download_cifar10(path='./data'):
+    """Download and extract CIFAR-10 dataset if it doesn't exist."""
+    if not os.path.exists(path):
+        os.makedirs(path)
+
+    url = "https://www.cs.toronto.edu/~kriz/cifar-10-python.tar.gz"
+    filename = os.path.join(path, "cifar-10-python.tar.gz")
+
+    if not os.path.exists(os.path.join(path, 'cifar-10-batches-py')):
+        print("Downloading CIFAR-10...")
+        urllib.request.urlretrieve(url, filename)
+
+        print("Extracting files...")
+        with tarfile.open(filename, 'r:gz') as tar:
+            tar.extractall(path=path)
+
+        print("Cleaning up...")
+        os.remove(filename)
+        print("Done!")
+
+
+def unpickle(file):
+    with open(file, 'rb') as fo:
+        data = pickle.load(fo, encoding='bytes')
+    return data
+
+
+def load_cifar10_data(path='./data'):
+    download_cifar10(path)
+
+    cifar_path = os.path.join(path, 'cifar-10-batches-py')
+
+    X_train = []
+    y_train = []
+
+    for batch in range(1, 6):
+        batch_file = os.path.join(cifar_path, f'data_batch_{batch}')
+        data_dict = unpickle(batch_file)
+
+        X_batch = np.ascontiguousarray(data_dict[b'data'])
+        y_batch = data_dict[b'labels']
+
+        X_train.append(X_batch)
+        y_train.extend(y_batch)
+
+    X_train = np.ascontiguousarray(np.concatenate(X_train, axis=0))
+    y_train = np.array(y_train)
+
+    test_file = os.path.join(cifar_path, 'test_batch')
+    test_dict = unpickle(test_file)
+
+    X_test = np.ascontiguousarray(test_dict[b'data'])
+    y_test = np.array(test_dict[b'labels'])
+
+    X_train = X_train.astype(np.float32) / 255.0
+    X_test = X_test.astype(np.float32) / 255.0
+
+    num_classes = 10
+    y_train_one_hot = np.zeros((y_train.shape[0], num_classes), dtype=np.float32)
+    y_train_one_hot[np.arange(y_train.shape[0]), y_train] = 1
+    y_train_one_hot = np.ascontiguousarray(y_train_one_hot)
+
+    y_test_one_hot = np.zeros((y_test.shape[0], num_classes), dtype=np.float32)
+    y_test_one_hot[np.arange(y_test.shape[0]), y_test] = 1
+    y_test_one_hot = np.ascontiguousarray(y_test_one_hot)
+
+    return X_train, y_train_one_hot, X_test, y_test_one_hot
+
+
+# if __name__ == "__main__":
+#     X_train, y_train, X_test, y_test = load_cifar10_data()
 #
-# # shuffle training dataset
-# keys = np.array(range(X.shape[0]))
-# np.random.shuffle(keys)
-# X = X[keys]
-# y = y[keys]
+#     print("Data shapes:")
+#     print(f"X_train: {X_train.shape}")
+#     print(f"y_train: {y_train.shape}")
+#     print(f"X_test: {X_test.shape}")
+#     print(f"y_test: {y_test.shape}")
 #
-# # scale to put put the data in [-1,1] range
-# X = (X.astype(np.float32) - 127.5) / 127.5
-# X_test = (X_test.astype(np.float32) - 127.5) / 127.5
+#     model = create_model()
 #
-# # change from 2d to 1d
-# X = X.reshape(X.shape[0], -1)
-# X_test = X_test.reshape(X_test.shape[0], -1)
+#     model.train(X_train, y_train,
+#                 validation_data=(X_test, y_test),
+#                 epochs=50,
+#                 batch_size=128,
+#                 print_every=100)
 #
-# model = Model()
-#
-# model.add(Layer_Dense(X.shape[1], 128))
-# model.add(Activation_ReLU())
-# model.add(Layer_Dense(128, 128))
-# model.add(Activation_ReLU())
-# model.add(Layer_Dense(128, 10))
-# model.add(Activation_Softmax())
-# model.set(
-#     loss=Loss_CategoricalCrossentropy(),
-#     optimizer=Optimizer_Adam(decay=1e-6),
-#     accuracy=Accuracy_Categorical()
-# )
-#
-# model.finalize()
-# model.train(X, y, validation_data=(X_test, y_test),
-#             epochs=10, batch_size=128, print_every=100)
-# # model.evaluate(X_test, y_test)
-# # model.evaluate(X, y)
+#     model.evaluate(X_test, y_test)
+
 # parameters = model.get_parameters()
-#
-# model = Model()
-# model.add(Layer_Dense(X.shape[1], 128))
-# model.add(Activation_ReLU())
-# model.add(Layer_Dense(128, 128))
-# model.add(Activation_ReLU())
-# model.add(Layer_Dense(128, 10))
-# model.add(Activation_Softmax())
-#
-# model.set(
-#     loss=Loss_CategoricalCrossentropy(),
-#     accuracy=Accuracy_Categorical()
-# )
-# model.finalize()
-# model.set_parameters(parameters)
-# model.evaluate(X_test, y_test)
-# model.save_parameters('fashion_mnist.params')
 
-# X, y, X_test, y_test = create_data_mnist('fashion_mnist_images')
-# keys = np.array(range(X.shape[0]))
-# np.random.shuffle(keys)
-# X = X[keys]
-# y = y[keys]
-#
-# X = (X.reshape(X.shape[0], -1).astype(np.float32) - 127.5) / 127.5
-# X_test = (X_test.reshape(X_test.shape[0], -1).astype(np.float32) -
-#           127.5) / 127.5
-#
-# model = Model()
-#
-# model.add(Layer_Dense(X.shape[1], 128))
-# model.add(Activation_ReLU())
-# model.add(Layer_Dense(128, 128))
-# model.add(Activation_ReLU())
-# model.add(Layer_Dense(128, 10))
-# model.add(Activation_Softmax())
-# model.set(
-#     loss=Loss_CategoricalCrossentropy(),
-#     accuracy=Accuracy_Categorical()
-# )
-# model.finalize()
-# model.load_parameters('fashion_mnist.params')
-# model.evaluate(X_test, y_test)
-# model.save('fashion_mnist.model')
 
 fashion_mnist_labels = {
     0: 'T-shirt/top',
@@ -814,7 +846,7 @@ fashion_mnist_labels = {
     9: 'Ankle boot'
 }
 
-image_data = cv2.imread('test2.png', cv2.IMREAD_GRAYSCALE)
+image_data = cv2.imread('test3.png', cv2.IMREAD_GRAYSCALE)
 image_data = cv2.resize(image_data, (28, 28))
 image_data = 255 - image_data
 image_data = (image_data.reshape(1, -1).astype(np.float32) -
@@ -825,5 +857,4 @@ model = Model.load('fashion_mnist.model')
 
 confidences = model.predict(image_data)
 predictions = model.output_layer_activation.predictions(confidences)
-prediction = fashion_mnist_labels[predictions[0]]
-print(prediction)
+print(fashion_mnist_labels[predictions[0]])
