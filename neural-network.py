@@ -69,8 +69,7 @@ class Layer_Dropout:
             self.output = inputs.copy()
             return
 
-        self.binary_mask = np.random.binomial(1, self.rate,
-                                              size=inputs.shape) / self.rate
+        self.binary_mask = np.random.binomial(1, self.rate, size=inputs.shape) / self.rate
         self.output = inputs * self.binary_mask
 
     def backward(self, dvalues):
@@ -305,7 +304,6 @@ class Optimizer_Adam:
             layer.bias_momentums = np.zeros_like(layer.biases)
             layer.bias_cache = np.zeros_like(layer.biases)
 
-        # Update momentum with current gradients
         layer.weight_momentums = np.ascontiguousarray(
             self.beta_1 * layer.weight_momentums +
             (1 - self.beta_1) * layer.dweights
@@ -315,13 +313,11 @@ class Optimizer_Adam:
             (1 - self.beta_1) * layer.dbiases
         )
 
-        # Get corrected momentum
         weight_momentums_corrected = layer.weight_momentums / \
                                      (1 - self.beta_1 ** (self.iterations + 1))
         bias_momentums_corrected = layer.bias_momentums / \
                                    (1 - self.beta_1 ** (self.iterations + 1))
 
-        # Update cache with squared current gradients
         layer.weight_cache = np.ascontiguousarray(
             self.beta_2 * layer.weight_cache +
             (1 - self.beta_2) * layer.dweights ** 2
@@ -331,13 +327,11 @@ class Optimizer_Adam:
             (1 - self.beta_2) * layer.dbiases ** 2
         )
 
-        # Get corrected cache
         weight_cache_corrected = layer.weight_cache / \
                                  (1 - self.beta_2 ** (self.iterations + 1))
         bias_cache_corrected = layer.bias_cache / \
                                (1 - self.beta_2 ** (self.iterations + 1))
 
-        # Vanilla SGD parameter update + normalization
         layer.weights = np.ascontiguousarray(
             layer.weights - self.current_learning_rate *
             weight_momentums_corrected /
@@ -440,8 +434,7 @@ class Model:
             self.softmax_classifier_output = Activation_Softmax_Loss_CategoricalCrossentropy()
 
     def train(self, X, y, *, epochs=1, batch_size=None, print_every=1, validation_data=None):
-        """Training loop optimized for GPU execution."""
-        # Import garbage collector for memory management
+
         import gc
 
         self.accuracy.init(y)
@@ -450,11 +443,9 @@ class Model:
         if validation_data is not None:
             validation_steps = 1
             X_val, y_val = validation_data
-            # Ensure validation data is in the right format
             X_val = np.ascontiguousarray(X_val, dtype=np.float32)
             y_val = np.ascontiguousarray(y_val, dtype=np.float32)
 
-        # Ensure training data is in the right format
         X = np.ascontiguousarray(X, dtype=np.float32)
         y = np.ascontiguousarray(y, dtype=np.float32)
 
@@ -468,7 +459,6 @@ class Model:
                 if validation_steps * batch_size < len(X_val):
                     validation_steps += 1
 
-        # Training loop
         for epoch in range(1, epochs + 1):
             print(f'epoch: {epoch}')
             self.loss.new_pass()
@@ -485,28 +475,22 @@ class Model:
                     batch_X = np.ascontiguousarray(batch_X)
                     batch_y = np.ascontiguousarray(batch_y)
 
-                # Forward pass
                 output = self.forward(batch_X, training=True)
 
-                # Calculate loss
                 data_loss, regularization_loss = \
                     self.loss.calculate(output, batch_y, include_regularization=True)
                 loss = data_loss + regularization_loss
 
-                # Calculate predictions and accuracy
                 predictions = self.output_layer_activation.predictions(output)
                 accuracy = self.accuracy.calculate(predictions, batch_y)
 
-                # Backward pass
                 self.backward(output, batch_y)
 
-                # Optimize
                 self.optimizer.pre_update_params()
                 for layer in self.trainable_layers:
                     self.optimizer.update_params(layer)
                 self.optimizer.post_update_params()
 
-                # Print progress
                 if not step % print_every or step == train_steps - 1:
                     print(f'step: {step}, ' +
                           f'acc: {accuracy:.3f}, ' +
@@ -515,10 +499,8 @@ class Model:
                           f'reg_loss: {regularization_loss:.3f}), ' +
                           f'lr: {self.optimizer.current_learning_rate}')
 
-                # Clear some memory after each batch
                 gc.collect()
 
-            # Calculate epoch metrics
             epoch_data_loss, epoch_regularization_loss = \
                 self.loss.calculate_accumulated(include_regularization=True)
             epoch_loss = epoch_data_loss + epoch_regularization_loss
@@ -531,11 +513,9 @@ class Model:
                   f'reg_loss: {epoch_regularization_loss:.3f}), ' +
                   f'lr: {self.optimizer.current_learning_rate}')
 
-            # Run validation
             if validation_data is not None:
                 self.evaluate(*validation_data, batch_size=batch_size)
 
-            # Clear memory after each epoch
             gc.collect()
 
     def forward(self, X, training):
@@ -743,7 +723,6 @@ def create_model():
 
 
 def download_cifar10(path='./data'):
-    """Download and extract CIFAR-10 dataset if it doesn't exist."""
     if not os.path.exists(path):
         os.makedirs(path)
 
